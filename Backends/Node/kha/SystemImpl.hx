@@ -15,8 +15,6 @@ import kha.netsync.Session;
 class SystemImpl {
 	static var screenRotation: ScreenRotation = ScreenRotation.RotationNone;
 
-	static inline var networkSendRate = 0.05;
-
 	public static function init(options: SystemOptions, callback: Window->Void): Void {
 		Window.get(0).width = options.width;
 		Window.get(0).height = options.height;
@@ -126,10 +124,15 @@ class SystemImpl {
 	}
 
 	static function synch() {
-		if (Session.the() != null) {
-			Session.the().update();
+		try {
+			if (Session.the() != null) {
+				Session.the().update();
+			}
 		}
-		Node.setTimeout(synch, Std.int(networkSendRate * 1000));
+		catch (e:Dynamic) {
+			Node.console.error("[netsync] synch error: " + e);
+		}
+		Node.setTimeout(synch, Std.int(Session.networkSendRate * 1000));
 	}
 
 	public static function getKeyboard(num: Int): Keyboard {
