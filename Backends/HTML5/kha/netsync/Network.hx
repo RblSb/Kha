@@ -65,4 +65,19 @@ class Network {
 			listener(Bytes.ofData(message.data));
 		};
 	}
+
+	public function close(): Void {
+		open = false;
+		if (socket != null) {
+			socket.onerror = null;
+			socket.onclose = null;
+			socket.onmessage = null;
+			socket.onopen = null;
+			try {
+				socket.close();
+			}
+			catch (_) {}
+			socket = null;
+		}
+	}
 }

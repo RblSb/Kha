@@ -12,16 +12,6 @@ import js.html.WebSocket;
 #end
 import kha.System;
 
-class State {
-	public var time: Float;
-	public var data: Bytes;
-
-	public function new(time: Float, data: Bytes) {
-		this.time = time;
-		this.data = data;
-	}
-}
-
 class Session {
 	public static inline var START = 0;
 	public static inline var ENTITY_UPDATES = 1;
@@ -33,6 +23,13 @@ class Session {
 
 	public static inline var RPC_SERVER = 0;
 	public static inline var RPC_ALL = 1;
+
+	/**
+		Server -> clients entity broadcast period, in seconds. Read by the
+		Node backend's `synch()` loop on every tick, so games can change it
+		at runtime.
+	**/
+	public static var networkSendRate: Float = 1 / 20;
 
 	static var instance: Session = null;
 
@@ -53,10 +50,6 @@ class Session {
 	var clients: Array<Client> = new Array();
 	var current: Client;
 	var isJoinable: Bool = false;
-	var lastStates: Array<State> = new Array();
-
-	static inline var stateCount = 60 * 10; // 10 seconds with 60 fps
-
 	#else
 	var localClient: Client;
 
@@ -114,11 +107,6 @@ class Session {
 			offset += entity._size();
 		}
 
-		lastStates.push(new State(Scheduler.time(), bytes));
-		if (lastStates.length > stateCount) {
-			lastStates.splice(0, 1);
-		}
-
 		return bytes;
 	}
 	#end
@@ -165,25 +153,21 @@ class Session {
 		switch (bytes.get(0)) {
 			case CONTROLLER_UPDATES:
 				var id = bytes.getInt32(1);
-				var time = bytes.getDouble(5);
-
-				var width = bytes.getInt32(13);
-				var height = bytes.getInt32(17);
-				var rotation = bytes.get(21);
-				SystemImpl._updateSize(width, height);
-				SystemImpl._updateScreenRotation(rotation);
-
+				// Bytes 5..21 (client timestamp + window size + rotation) are
+				// ignored in this build. We used to feed them through
+				// processEventRetroactively() + Scheduler.warp(), which made
+				// the server's tick rate scale with the client's frame rate
+				// and choked the event loop. Inputs are now applied
+				// immediately and the simulation stays authoritative.
 				if (controllers.exists(id)) {
-					processEventRetroactively(function() {
-						current = client;
-						var offset = 22;
-						while (offset < bytes.length) {
-							var length = bytes.getInt32(offset);
-							controllers[id]._receive(bytes.sub(offset + 4, length));
-							offset += (4 + length);
-						}
-						current = null;
-					}, time);
+					current = client;
+					var offset = 22;
+					while (offset < bytes.length) {
+						var length = bytes.getInt32(offset);
+						controllers[id]._receive(bytes.sub(offset + 4, length));
+						offset += (4 + length);
+					}
+					current = null;
 				}
 			case REMOTE_CALL:
 				processRPC(bytes);
@@ -197,20 +181,21 @@ class Session {
 			case START:
 				var index = bytes.get(1);
 				localClient = new LocalClient(index);
-				Scheduler.resetTime();
+				// Do NOT reset/warp the client scheduler from server time -
+				// it stomps on the host app's frame tasks and makes input
+				// feel laggy. Client time stays monotonic.
 				startCallback();
 			case ENTITY_UPDATES:
-				var time = bytes.getDouble(1);
 				var offset = 9;
 				for (entity in entities) {
 					entity._receive(offset, bytes);
 					offset += entity._size();
 				}
-				Scheduler.warp(time);
+			// (server-side simulation time in bytes 1..8 ignored)
 			case REMOTE_CALL:
 				switch (bytes.get(1)) {
 					case RPC_SERVER:
-					// Mainly a safeguard, packets with RPC_SERVER should not be received here
+						// Mainly a safeguard, packets with RPC_SERVER should not be received here
 					case RPC_ALL:
 						executeRPC(bytes);
 				}
@@ -219,42 +204,12 @@ class Session {
 				ping = Scheduler.realTime() - sendTime;
 			case SESSION_ERROR:
 				refusedCallback();
+				close();
 			case PLAYER_UPDATES:
 				currentPlayers = bytes.getInt32(1);
 		}
 		#end
 	}
-
-	#if sys_server
-	private function processEventRetroactively(event: Void->Void, time: Float) {
-		if (time <= Scheduler.time()) {
-			// var temp = time;
-			// Process after earliest saved state if it is too far back
-			if (time <= lastStates[0].time) {
-				time = lastStates[0].time + 0.00001;
-			}
-
-			var i = lastStates.length - 1;
-			while (i >= 0) {
-				if (lastStates[i].time < time) {
-					var offset = 9;
-					for (entity in entities) {
-						entity._receive(offset, lastStates[i].data);
-						offset += entity._size();
-					}
-					// Invalidate states in which the new event is missing
-					if (i < lastStates.length - 1) {
-						lastStates.splice(i + 1, lastStates.length - i - 1);
-					}
-					Scheduler.warp(lastStates[i].time);
-					break;
-				}
-				--i;
-			}
-		}
-		Scheduler.addTimeTask(event, time - Scheduler.time());
-	}
-	#end
 
 	#if sys_server
 	public function processRPC(bytes: Bytes) {
@@ -393,9 +348,23 @@ class Session {
 		network.listen(function(bytes: Bytes) {
 			receive(bytes);
 		});
-		updateTaskId = Scheduler.addFrameTask(update, 0);
+		// Flush input on a fixed 60Hz cadence regardless of client refresh
+		// rate. addFrameTask on a 120/144Hz display would otherwise send
+		// twice as many input packets and double the server's CPU load.
+		updateTaskId = Scheduler.addTimeTask(update, 0, 1 / 60);
 		ping = 1;
 		pingTaskId = Scheduler.addTimeTask(sendPing, 0, 1);
+		#end
+	}
+
+	public function close(): Void {
+		#if !sys_server
+		Scheduler.removeTimeTask(updateTaskId);
+		Scheduler.removeTimeTask(pingTaskId);
+		if (network != null) {
+			network.close();
+			network = null;
+		}
 		#end
 	}
 
@@ -404,8 +373,12 @@ class Session {
 		isJoinable = true;
 		server.reset();
 		#else
-		Scheduler.removeFrameTask(updateTaskId);
+		Scheduler.removeTimeTask(updateTaskId);
 		Scheduler.removeTimeTask(pingTaskId);
+		if (network != null) {
+			network.close();
+			network = null;
+		}
 		#end
 		currentPlayers = 0;
 		ping = 1;
