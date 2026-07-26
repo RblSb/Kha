@@ -20,7 +20,9 @@ import kha.graphics4.TextureFormat;
 import kha.input.Gamepad;
 import kha.input.KeyCode;
 import kha.input.Keyboard;
+import kha.input.KeyboardImpl;
 import kha.input.Mouse;
+import kha.input.MouseImpl;
 import kha.input.Sensor;
 import kha.input.Surface;
 import kha.js.AudioElementAudio;
@@ -215,7 +217,8 @@ class SystemImpl {
 	}
 
 	public static function vibrate(ms: Int): Void {
-		if (Browser.navigator.vibrate == null) return;
+		if (Browser.navigator.vibrate == null)
+			return;
 		Browser.navigator.vibrate(ms);
 	}
 
@@ -247,9 +250,9 @@ class SystemImpl {
 
 	static function init2(defaultWidth: Int, defaultHeight: Int, ?backbufferFormat: TextureFormat) {
 		#if !kha_no_keyboard
-		keyboard = new Keyboard();
+		keyboard = new KeyboardImpl();
 		#end
-		mouse = new kha.input.MouseImpl();
+		mouse = new MouseImpl();
 		surface = new Surface();
 		gamepads = new Array<Gamepad>();
 		gamepadStates = new Array<GamepadStates>();
@@ -498,7 +501,6 @@ class SystemImpl {
 		if (keyboard != null) {
 			canvas.onkeydown = keyDown;
 			canvas.onkeyup = keyUp;
-			canvas.onkeypress = keyPress;
 		}
 		canvas.onblur = onBlur;
 		canvas.onfocus = onFocus;
@@ -673,7 +675,7 @@ class SystemImpl {
 	static var iosSoundEnabled: Bool = false;
 
 	static function unlockiOSSound(): Void {
-		if (!ios || iosSoundEnabled)
+		if (!ios || iosSoundEnabled || MobileWebAudio._context == null)
 			return;
 
 		var buffer = MobileWebAudio._context.createBuffer(1, 1, 22050);
@@ -933,6 +935,8 @@ class SystemImpl {
 			var id = touch.identifier;
 			if (ios) {
 				id = iosTouchs.indexOf(id);
+				if (id == -1)
+					continue;
 				iosTouchs[id] = -1;
 			}
 
@@ -978,8 +982,12 @@ class SystemImpl {
 
 		for (touch in event.changedTouches) {
 			var id = touch.identifier;
-			if (ios)
+			if (ios) {
 				id = iosTouchs.indexOf(id);
+				if (id == -1)
+					continue;
+				iosTouchs[id] = -1;
+			}
 
 			setTouchXY(touch);
 			if (!Surface.listenedEventsBefore) {
@@ -987,7 +995,6 @@ class SystemImpl {
 			}
 			surface.sendTouchEndEvent(id, touchX, touchY);
 		}
-		iosTouchs = [];
 		insideInputEvent = false;
 	}
 
@@ -1001,133 +1008,6 @@ class SystemImpl {
 		System.foreground();
 	}
 
-	static function keycodeToChar(key: String, keycode: Int, shift: Bool): String {
-		if (key != null) {
-			if (key.length == 1)
-				return key;
-			switch (key) {
-				case "Add":
-					return "+";
-				case "Subtract":
-					return "-";
-				case "Multiply":
-					return "*";
-				case "Divide":
-					return "/";
-			}
-		}
-		switch (keycode) {
-			case 187:
-				if (shift)
-					return "*";
-				else
-					return "+";
-			case 188:
-				if (shift)
-					return ";";
-				else
-					return ",";
-			case 189:
-				if (shift)
-					return "_";
-				else
-					return "-";
-			case 190:
-				if (shift)
-					return ":";
-				else
-					return ".";
-			case 191:
-				if (shift)
-					return "'";
-				else
-					return "#";
-			case 226:
-				if (shift)
-					return ">";
-				else
-					return "<";
-			case 106:
-				return "*";
-			case 107:
-				return "+";
-			case 109:
-				return "-";
-			case 111:
-				return "/";
-			case 49:
-				if (shift)
-					return "!";
-				else
-					return "1";
-			case 50:
-				if (shift)
-					return "\"";
-				else
-					return "2";
-			case 51:
-				if (shift)
-					return "§";
-				else
-					return "3";
-			case 52:
-				if (shift)
-					return "$";
-				else
-					return "4";
-			case 53:
-				if (shift)
-					return "%";
-				else
-					return "5";
-			case 54:
-				if (shift)
-					return "&";
-				else
-					return "6";
-			case 55:
-				if (shift)
-					return "/";
-				else
-					return "7";
-			case 56:
-				if (shift)
-					return "(";
-				else
-					return "8";
-			case 57:
-				if (shift)
-					return ")";
-				else
-					return "9";
-			case 48:
-				if (shift)
-					return "=";
-				else
-					return "0";
-			case 219:
-				if (shift)
-					return "?";
-				else
-					return "ß";
-			case 212:
-				if (shift)
-					return "`";
-				else
-					return "´";
-		}
-		if (keycode >= 96 && keycode <= 105) { // num block
-			return String.fromCharCode("0".code - 96 + keycode);
-		}
-		if (keycode >= "A".code && keycode <= "Z".code) {
-			if (shift)
-				return String.fromCharCode(keycode);
-			else
-				return String.fromCharCode(keycode - "A".code + "a".code);
-		}
-		return String.fromCharCode(keycode);
-	}
-
 	static function keyDown(event: KeyboardEvent): Void {
 		insideInputEvent = true;
 		activeKeyEvent = event;
@@ -1139,10 +1019,17 @@ class SystemImpl {
 		// prevent key repeat
 		if (event.repeat) {
 			event.preventDefault();
+			activeKeyEvent = null;
+			insideInputEvent = false;
 			return;
 		}
-		var keyCode = fixedKeyCode(event);
+		final keyCode = fixedKeyCode(event);
 		keyboard.sendDownEvent(keyCode);
+
+		if (event.key.length == 1) {
+			keyboard.sendPressEvent(event.key);
+		}
+
 		activeKeyEvent = null;
 		insideInputEvent = false;
 	}
@@ -1172,24 +1059,26 @@ class SystemImpl {
 	}
 
 	static function defaultKeyBlock(e: KeyboardEvent): Void {
+		final keyCode: KeyCode = cast e.keyCode;
 		// block if ctrl key pressed
 		if (e.ctrlKey || e.metaKey) {
 			// except for cut-copy-paste
-			if (e.keyCode == 67 || e.keyCode == 88 || e.keyCode == 86) {
+			if (keyCode == C || keyCode == X || keyCode == V) {
 				return;
 			}
 			// and quit on macOS
-			if (e.metaKey && e.keyCode == 81) {
+			if (e.metaKey && keyCode == Q) {
 				return;
 			}
 			e.preventDefault();
 			return;
 		}
+
 		// allow F-keys
-		if (e.keyCode >= 112 && e.keyCode <= 123)
+		if (e.keyCode >= F1.toInt() && e.keyCode <= F12.toInt())
 			return;
 		// allow char keys
-		if (e.key == null || e.key.length == 1)
+		if (e.key.length == 1)
 			return;
 		e.preventDefault();
 	}
@@ -1204,21 +1093,6 @@ class SystemImpl {
 
 		var keyCode = fixedKeyCode(event);
 		keyboard.sendUpEvent(keyCode);
-
-		activeKeyEvent = null;
-		insideInputEvent = false;
-	}
-
-	static function keyPress(event: KeyboardEvent): Void {
-		insideInputEvent = true;
-		activeKeyEvent = event;
-		unlockSound();
-
-		if (event.which == 0)
-			return; // for Firefox and Safari
-		preventDefaultKeyBehavior(event);
-		event.stopPropagation();
-		keyboard.sendPressEvent(String.fromCharCode(event.which));
 
 		activeKeyEvent = null;
 		insideInputEvent = false;
