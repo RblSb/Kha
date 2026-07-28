@@ -11,7 +11,7 @@ using StringTools;
 
 class KeyboardImpl extends kha.input.Keyboard {
 	static var virtualKeyboardId = "kha-virtual-keyboard";
-	static var input: InputElement;
+	public static var input: InputElement;
 
 	public function new() {
 		super();
@@ -85,8 +85,8 @@ class KeyboardImpl extends kha.input.Keyboard {
 	}
 
 	override function hide(): Void {
+		SystemImpl.khanvas.focus();
 		if (input != null)
 			document.body.removeChild(input);
-		SystemImpl.khanvas.focus();
 	}
 }

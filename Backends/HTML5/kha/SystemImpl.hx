@@ -7,6 +7,7 @@ import js.html.ClipboardEvent;
 import js.html.DeviceMotionEvent;
 import js.html.DeviceOrientationEvent;
 import js.html.DragEvent;
+import js.html.FocusEvent;
 import js.html.KeyboardEvent;
 import js.html.MouseEvent;
 import js.html.PointerEvent;
@@ -998,12 +999,18 @@ class SystemImpl {
 		insideInputEvent = false;
 	}
 
-	static function onBlur() {
+	static function onBlur(event: FocusEvent) {
+		final input = KeyboardImpl.input;
+		if (input != null && event.relatedTarget == input)
+			return;
 		// System.pause();
 		System.background();
 	}
 
-	static function onFocus() {
+	static function onFocus(event: FocusEvent) {
+		final input = KeyboardImpl.input;
+		if (input != null && event.relatedTarget == input)
+			return;
 		// System.resume();
 		System.foreground();
 	}
