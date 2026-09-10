@@ -179,7 +179,7 @@ class Session {
 		#else
 		switch (bytes.get(0)) {
 			case START:
-				var index = bytes.get(1);
+				var index = bytes.length >= 5 ? bytes.getInt32(1) : bytes.get(1);
 				localClient = new LocalClient(index);
 				// Do NOT reset/warp the client scheduler from server time -
 				// it stomps on the host app's frame tasks and makes input
@@ -291,13 +291,14 @@ class Session {
 		refusedCallback = refuseCallback;
 		resetCallback = resCallback;
 		#if sys_server
-		isJoinable = true;
 		#if direct_connection
 		trace("Starting server at " + port + ".");
 		#end
 		server = new Server(port);
+		startCallback();
+
 		server.onConnection(function(client: Client) {
-			if (!isJoinable) {
+			if (maxPlayers > 0 && clients.length >= maxPlayers) {
 				var bytes = Bytes.alloc(1);
 				bytes.set(0, SESSION_ERROR);
 				client.send(bytes, true);
@@ -318,27 +319,12 @@ class Session {
 				Node.console.log("Removing client " + client.id + ".");
 				clients.remove(client);
 				sendPlayerUpdate();
-				// isJoinable is intentionally not reset here immediately, as late joining is currently unsupported
-				if (clients.length == 0) {
-					reset();
-				}
 			});
 
-			if (clients.length >= maxPlayers) {
-				isJoinable = false;
-				Node.console.log("Starting game.");
-				var index = 0;
-				for (c in clients) {
-					trace("Starting client " + c.id);
-					var bytes = Bytes.alloc(2);
-					bytes.set(0, START);
-					bytes.set(1, index);
-					c.send(bytes, true);
-					++index;
-				}
-				Scheduler.resetTime();
-				startCallback();
-			}
+			var bytes = Bytes.alloc(5);
+			bytes.set(0, START);
+			bytes.setInt32(1, client.id);
+			client.send(bytes, true);
 		});
 		#else
 		network = new Network(address, port, errorCallback, function() {
