@@ -19,18 +19,12 @@ class EntityBuilder {
 			}
 		}
 
-		var receive = macro {};
-
-		var send = macro {};
+		var sendExprs: Array<Expr> = [];
+		var receiveExprs: Array<Expr> = [];
 
 		if (!isBaseEntity) {
-			receive = macro {
-				offset += super._receive(offset, bytes);
-			};
-
-			send = macro {
-				offset += super._send(offset, bytes);
-			};
+			receiveExprs.push(macro offset += super._receive(offset, bytes));
+			sendExprs.push(macro offset += super._send(offset, bytes));
 		}
 
 		var index: Int = 0;
@@ -45,58 +39,32 @@ class EntityBuilder {
 			if (!replicated)
 				continue;
 
-			switch (field.kind) {
-				case FVar(t, e):
-					var fieldname = field.name;
-					switch (t) {
-						case TPath(p):
-							switch (p.name) {
-								case "Int":
-									send = macro {
-										$send;
-										bytes.setInt32(offset + $v{index}, this.$fieldname);
-									};
-									receive = macro {
-										$receive;
-										this.$fieldname = bytes.getInt32(offset + $v{index});
-									};
-									index += 4;
-								case "Float":
-									send = macro {
-										$send;
-										bytes.setDouble(offset + $v{index}, this.$fieldname);
-									};
-									receive = macro {
-										$receive;
-										this.$fieldname = bytes.getDouble(offset + $v{index});
-									};
-									index += 8;
-								case "Bool":
-									send = macro {
-										$send;
-										bytes.set(offset + $v{index}, this.$fieldname ? 1 : 0);
-									};
-									receive = macro {
-										$receive;
-										this.$fieldname = bytes.get(offset + $v{index}) == 1 ? true : false;
-									};
-									index += 1;
-							}
-						default:
-					}
+			var typeName = switch (field.kind) {
+				case FVar(t, e), FProp(_, _, t, e): resolveTypeName(t, e);
+				default: null;
+			};
+
+			var fieldname = field.name;
+			switch (typeName) {
+				case "Int":
+					sendExprs.push(macro bytes.setInt32(offset + $v{index}, this.$fieldname));
+					receiveExprs.push(macro this.$fieldname = bytes.getInt32(offset + $v{index}));
+					index += 4;
+				case "Float":
+					sendExprs.push(macro bytes.setDouble(offset + $v{index}, this.$fieldname));
+					receiveExprs.push(macro this.$fieldname = bytes.getDouble(offset + $v{index}));
+					index += 8;
+				case "Bool":
+					sendExprs.push(macro bytes.set(offset + $v{index}, this.$fieldname ? 1 : 0));
+					receiveExprs.push(macro this.$fieldname = bytes.get(offset + $v{index}) != 0);
+					index += 1;
 				default:
+					Context.error('Unsupported or unresolved type for @replicated field "${field.name}". Must be Int, Float, or Bool.', field.pos);
 			}
 		}
 
-		send = macro {
-			$send;
-			return $v{index};
-		};
-
-		receive = macro {
-			$receive;
-			return $v{index};
-		};
+		sendExprs.push(macro return $v{index});
+		receiveExprs.push(macro return $v{index});
 
 		fields.push({
 			name: "_send",
@@ -104,19 +72,19 @@ class EntityBuilder {
 			meta: [],
 			access: isBaseEntity ? [APublic] : [APublic, AOverride],
 			kind: FFun({
-				ret: Context.toComplexType(Context.getType("Int")),
+				ret: macro : Int,
 				params: null,
-				expr: send,
+				expr: macro $b{sendExprs},
 				args: [
 					{
 						value: null,
-						type: Context.toComplexType(Context.getType("Int")),
+						type: macro : Int,
 						opt: null,
 						name: "offset"
 					},
 					{
 						value: null,
-						type: Context.toComplexType(Context.getType("haxe.io.Bytes")),
+						type: macro : haxe.io.Bytes,
 						opt: null,
 						name: "bytes"
 					}
@@ -131,19 +99,19 @@ class EntityBuilder {
 			meta: [],
 			access: isBaseEntity ? [APublic] : [APublic, AOverride],
 			kind: FFun({
-				ret: Context.toComplexType(Context.getType("Int")),
+				ret: macro : Int,
 				params: null,
-				expr: receive,
+				expr: macro $b{receiveExprs},
 				args: [
 					{
 						value: null,
-						type: Context.toComplexType(Context.getType("Int")),
+						type: macro : Int,
 						opt: null,
 						name: "offset"
 					},
 					{
 						value: null,
-						type: Context.toComplexType(Context.getType("haxe.io.Bytes")),
+						type: macro : haxe.io.Bytes,
 						opt: null,
 						name: "bytes"
 					}
@@ -158,7 +126,7 @@ class EntityBuilder {
 			meta: [],
 			access: isBaseEntity ? [APublic] : [APublic, AOverride],
 			kind: FFun({
-				ret: Context.toComplexType(Context.getType("Int")),
+				ret: macro : Int,
 				params: null,
 				expr: macro {return __id;},
 				args: []
@@ -166,15 +134,12 @@ class EntityBuilder {
 			pos: Context.currentPos()
 		});
 
-		var size = macro {
-			return $v{index};
-		};
-
-		if (!isBaseEntity) {
-			size = macro {
-				return super._size() + $v{index};
-			};
+		var sizeExpr = if (!isBaseEntity) {
+			macro return super._size() + $v{index};
 		}
+		else {
+			macro return $v{index};
+		};
 
 		fields.push({
 			name: "_size",
@@ -182,9 +147,9 @@ class EntityBuilder {
 			meta: [],
 			access: isBaseEntity ? [APublic] : [APublic, AOverride],
 			kind: FFun({
-				ret: Context.toComplexType(Context.getType("Int")),
+				ret: macro : Int,
 				params: null,
-				expr: size,
+				expr: sizeExpr,
 				args: []
 			}),
 			pos: Context.currentPos()
@@ -202,5 +167,23 @@ class EntityBuilder {
 		}
 
 		return fields;
+	}
+
+	static function resolveTypeName(t: ComplexType, e: Expr): Null<String> {
+		if (t != null) {
+			return switch (t) {
+				case TPath(p): p.name;
+				default: null;
+			}
+		}
+		if (e != null) {
+			return switch (e.expr) {
+				case EConst(CInt(_)) | EUnop(OpNeg, _, {expr: EConst(CInt(_))}): "Int";
+				case EConst(CFloat(_)) | EUnop(OpNeg, _, {expr: EConst(CFloat(_))}): "Float";
+				case EConst(CIdent("true" | "false")): "Bool";
+				default: null;
+			}
+		}
+		return null;
 	}
 }
