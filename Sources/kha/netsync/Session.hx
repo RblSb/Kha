@@ -84,6 +84,18 @@ class Session {
 		entities.set(entity._id(), entity);
 	}
 
+	public function removeEntity(entity: Entity): Void {
+		entities.remove(entity._id());
+	}
+
+	public function removeEntityById(id: Int): Void {
+		entities.remove(id);
+	}
+
+	public function getEntity(id: Int): Entity {
+		return entities.get(id);
+	}
+
 	public function addController(controller: Controller): Void {
 		trace("Adding controller id " + controller._id());
 		controller._inputBufferIndex = 0;
@@ -94,7 +106,7 @@ class Session {
 	private function send(): Bytes {
 		var size = 0;
 		for (entity in entities) {
-			size += entity._size();
+			size += 6 + entity._size();
 		}
 		var offset = 0;
 		var bytes = Bytes.alloc(size + 9);
@@ -103,6 +115,10 @@ class Session {
 		bytes.setDouble(offset, Scheduler.time());
 		offset += 8;
 		for (entity in entities) {
+			bytes.setInt32(offset, entity._id());
+			offset += 4;
+			bytes.setUInt16(offset, entity._size());
+			offset += 2;
 			entity._send(offset, bytes);
 			offset += entity._size();
 		}
@@ -187,9 +203,17 @@ class Session {
 				startCallback();
 			case ENTITY_UPDATES:
 				var offset = 9;
-				for (entity in entities) {
-					entity._receive(offset, bytes);
-					offset += entity._size();
+				while (offset + 6 <= bytes.length) {
+					var id = bytes.getInt32(offset);
+					offset += 4;
+					var size = bytes.getUInt16(offset);
+					offset += 2;
+					if (offset + size > bytes.length)
+						break;
+					if (entities.exists(id)) {
+						entities[id]._receive(offset, bytes);
+					}
+					offset += size;
 				}
 			// (server-side simulation time in bytes 1..8 ignored)
 			case REMOTE_CALL:
