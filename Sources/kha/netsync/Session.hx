@@ -20,6 +20,8 @@ class Session {
 	public static inline var PING = 4;
 	public static inline var SESSION_ERROR = 5;
 	public static inline var PLAYER_UPDATES = 6;
+	public static inline var ENTITY_ADD = 7;
+	public static inline var ENTITY_REMOVE = 8;
 
 	public static inline var RPC_SERVER = 0;
 	public static inline var RPC_ALL = 1;
@@ -33,8 +35,12 @@ class Session {
 
 	static var instance: Session = null;
 
-	var entities: Map<Int, Entity> = new Map();
-	var controllers: Map<Int, Controller> = new Map();
+	var entities: Map<Int, Entity> = [];
+	var controllers: Map<Int, Controller> = [];
+
+	public var onEntityAdd: (id: Int, type: Int) -> Void;
+	public var onEntityRemove: (id: Int) -> Void;
+	public var onPlayerUpdate: (currentPlayers: Int) -> Void;
 
 	public var maxPlayers: Int;
 	public var currentPlayers: Int = 0;
@@ -45,7 +51,12 @@ class Session {
 	var startCallback: Void->Void;
 	var refusedCallback: Void->Void;
 	var resetCallback: Void->Void;
+
 	#if sys_server
+	public var onClientConnect: (client: Client) -> Void;
+	public var onClientDisconnect: (client: Client) -> Void;
+
+	var entityTypes: Map<Int, Int> = [];
 	var server: Server;
 	var clients: Array<Client> = new Array();
 	var current: Client;
@@ -80,17 +91,46 @@ class Session {
 		return instance;
 	}
 
-	public function addEntity(entity: Entity): Void {
+	public function addEntity(entity: Entity, type: Int = 0): Void {
 		entities.set(entity._id(), entity);
+		#if sys_server
+		entityTypes.set(entity._id(), type);
+		sendEntityAdd(entity._id(), type);
+		#end
 	}
 
 	public function removeEntity(entity: Entity): Void {
-		entities.remove(entity._id());
+		removeEntityById(entity._id());
 	}
 
 	public function removeEntityById(id: Int): Void {
 		entities.remove(id);
+		#if sys_server
+		entityTypes.remove(id);
+		sendEntityRemove(id);
+		#end
 	}
+
+	#if sys_server
+	function sendEntityAdd(id: Int, type: Int): Void {
+		var bytes = Bytes.alloc(7);
+		bytes.set(0, ENTITY_ADD);
+		bytes.setInt32(1, id);
+		bytes.setUInt16(5, type);
+		for (client in clients) {
+			client.send(bytes, true);
+		}
+	}
+
+	function sendEntityRemove(id: Int): Void {
+		var bytes = Bytes.alloc(5);
+		bytes.set(0, ENTITY_REMOVE);
+		bytes.setInt32(1, id);
+		for (client in clients) {
+			client.send(bytes, true);
+		}
+	}
+	#end
 
 	public function getEntity(id: Int): Entity {
 		return entities.get(id);
@@ -231,6 +271,21 @@ class Session {
 				close();
 			case PLAYER_UPDATES:
 				currentPlayers = bytes.getInt32(1);
+				if (onPlayerUpdate != null) {
+					onPlayerUpdate(currentPlayers);
+				}
+			case ENTITY_ADD:
+				var id = bytes.getInt32(1);
+				var type = bytes.getUInt16(5);
+				if (onEntityAdd != null) {
+					onEntityAdd(id, type);
+				}
+			case ENTITY_REMOVE:
+				var id = bytes.getInt32(1);
+				if (onEntityRemove != null) {
+					onEntityRemove(id);
+				}
+				removeEntityById(id);
 		}
 		#end
 	}
@@ -341,12 +396,28 @@ class Session {
 				Node.console.log("Removing client " + client.id + ".");
 				clients.remove(client);
 				sendPlayerUpdate();
+				if (onClientDisconnect != null) {
+					onClientDisconnect(client);
+				}
 			});
 
 			var bytes = Bytes.alloc(5);
 			bytes.set(0, START);
 			bytes.setInt32(1, client.id);
 			client.send(bytes, true);
+
+			for (id in entities.keys()) {
+				var type = entityTypes.exists(id) ? entityTypes[id] : 0;
+				var addBytes = Bytes.alloc(7);
+				addBytes.set(0, ENTITY_ADD);
+				addBytes.setInt32(1, id);
+				addBytes.setUInt16(5, type);
+				client.send(addBytes, true);
+			}
+
+			if (onClientConnect != null) {
+				onClientConnect(client);
+			}
 		});
 		#else
 		network = new Network(address, port, errorCallback, function() {
@@ -380,6 +451,7 @@ class Session {
 		#if sys_server
 		isJoinable = true;
 		server.reset();
+		entityTypes = [];
 		#else
 		Scheduler.removeTimeTask(updateTaskId);
 		Scheduler.removeTimeTask(pingTaskId);
@@ -390,8 +462,8 @@ class Session {
 		#end
 		currentPlayers = 0;
 		ping = 1;
-		controllers = new Map();
-		entities = new Map();
+		controllers = [];
+		entities = [];
 		resetCallback();
 	}
 
