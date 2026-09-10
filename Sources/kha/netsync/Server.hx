@@ -1,6 +1,5 @@
 package kha.netsync;
 
-import haxe.io.Bytes;
 #if sys_server
 import js.Node;
 #end
@@ -28,8 +27,7 @@ private typedef WsServerOptions = {
 **/
 class Server {
 	#if sys_server
-	private var wss: WsServer;
-	private var lastId: Int = -1;
+	var wss: WsServer;
 	#end
 
 	public function new(port: Int) {
@@ -45,21 +43,16 @@ class Server {
 		#end
 	}
 
-	public function onConnection(connection: Client->Void): Void {
+	public function onConnection(connection: (socket: WsSocket) -> Void): Void {
 		#if sys_server
 		wss.on("connection", function(socket: WsSocket) {
 			socket.on("error", function(err) {
 				Node.console.error("[netsync] socket error: " + err);
 			});
-			++lastId;
-			connection(new WebSocketClient(lastId, socket));
+			connection(socket);
 		});
 		#end
 	}
 
-	public function reset(): Void {
-		#if sys_server
-		lastId = -1;
-		#end
-	}
+	public function reset(): Void {}
 }
