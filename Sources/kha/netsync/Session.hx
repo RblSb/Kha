@@ -2,7 +2,6 @@ package kha.netsync;
 
 import haxe.io.Bytes;
 #if sys_server
-import js.node.Http;
 import js.Node;
 #end
 #if js
@@ -31,7 +30,7 @@ class Session {
 		Node backend's `synch()` loop on every tick, so games can change it
 		at runtime.
 	**/
-	public static var networkSendRate: Float = 1 / 20;
+	public static var networkSendRate = 1 / 20;
 
 	static var instance: Session = null;
 
@@ -43,24 +42,27 @@ class Session {
 	public var onPlayerUpdate: (currentPlayers: Int) -> Void;
 
 	public var maxPlayers: Int;
-	public var currentPlayers: Int = 0;
-	public var ping: Float = 1;
+	public var currentPlayers = 0;
+	public var ping = 1.0;
 
 	var address: String;
 	var port: Int;
-	var startCallback: Void->Void;
-	var refusedCallback: Void->Void;
-	var resetCallback: Void->Void;
+	var startCallback: () -> Void;
+	var refusedCallback: () -> Void;
+	var resetCallback: () -> Void;
 
 	#if sys_server
 	public var onClientConnect: (client: Client) -> Void;
 	public var onClientDisconnect: (client: Client) -> Void;
 
 	var entityTypes: Map<Int, Int> = [];
+	var clientControllers: Map<Int, Array<Int>> = [];
 	var server: Server;
-	var clients: Array<Client> = new Array();
+	var clients: Array<Client> = [];
 	var current: Client;
-	var isJoinable: Bool = false;
+	var isJoinable = false;
+	var freeIds: Array<Int> = [];
+	var nextId = 0;
 	#else
 	var localClient: Client;
 
@@ -142,6 +144,42 @@ class Session {
 		controllers.set(controller._id(), controller);
 	}
 
+	public function addClientController(client: Client, controller: Controller): Void {
+		#if sys_server
+		if (!clientControllers.exists(client.id)) {
+			clientControllers[client.id] = [];
+		}
+		clientControllers[client.id].push(controller._id());
+		#end
+	}
+
+	public function removeClientController(client: Client, controller: Controller): Void {
+		#if sys_server
+		var list = clientControllers.get(client.id);
+		if (list != null) {
+			list.remove(controller._id());
+			if (list.length == 0) {
+				clientControllers.remove(client.id);
+			}
+		}
+		#end
+	}
+
+	function canClientControl(client: Client, controllerId: Int): Bool {
+		#if sys_server
+		if (client == null) {
+			return true;
+		}
+		if (!clientControllers.iterator().hasNext()) {
+			return true;
+		}
+		var allowed = clientControllers.get(client.id);
+		return allowed != null && allowed.indexOf(controllerId) != -1;
+		#else
+		return true;
+		#end
+	}
+
 	#if sys_server
 	private function send(): Bytes {
 		var size = 0;
@@ -167,7 +205,7 @@ class Session {
 	}
 	#end
 
-	public function sendControllerUpdate(id: Int, bytes: haxe.io.Bytes) {
+	public function sendControllerUpdate(id: Int, bytes: Bytes) {
 		#if !sys_server
 		if (controllers.exists(id)) {
 			if (controllers[id]._inputBuffer.length < controllers[id]._inputBufferIndex + 4 + bytes.length) {
@@ -185,8 +223,8 @@ class Session {
 
 	function sendPing() {
 		#if !sys_server
-		var bytes = haxe.io.Bytes.alloc(5);
-		bytes.set(0, kha.netsync.Session.PING);
+		var bytes = Bytes.alloc(5);
+		bytes.set(0, PING);
 		bytes.setFloat(1, Scheduler.realTime());
 
 		sendToServer(bytes);
@@ -196,7 +234,7 @@ class Session {
 	function sendPlayerUpdate() {
 		#if sys_server
 		currentPlayers = clients.length;
-		var bytes = haxe.io.Bytes.alloc(5);
+		var bytes = Bytes.alloc(5);
 		bytes.set(0, PLAYER_UPDATES);
 		bytes.setInt32(1, currentPlayers);
 
@@ -215,7 +253,7 @@ class Session {
 				// the server's tick rate scale with the client's frame rate
 				// and choked the event loop. Inputs are now applied
 				// immediately and the simulation stays authoritative.
-				if (controllers.exists(id)) {
+				if (canClientControl(client, id) && controllers.exists(id)) {
 					current = client;
 					var offset = 22;
 					while (offset < bytes.length) {
@@ -303,9 +341,9 @@ class Session {
 	#end
 
 	function executeRPC(bytes: Bytes) {
-		var args = new Array<Dynamic>();
+		var args: Array<Dynamic> = [];
 		var syncId = bytes.getInt32(2);
-		var index: Int = 6;
+		var index = 6;
 
 		var classnamelength = bytes.getUInt16(index);
 		index += 2;
@@ -364,8 +402,8 @@ class Session {
 		}
 	}
 
-	public function waitForStart(callback: Void->Void, refuseCallback: Void->Void, errorCallback: Void->Void, closeCallback: Void->Void,
-			resCallback: Void->Void): Void {
+	public function waitForStart(callback: () -> Void, refuseCallback: () -> Void, errorCallback: () -> Void, closeCallback: () -> Void,
+			resCallback: () -> Void): Void {
 		startCallback = callback;
 		refusedCallback = refuseCallback;
 		resetCallback = resCallback;
@@ -374,14 +412,18 @@ class Session {
 		server = new Server(port);
 		startCallback();
 
-		server.onConnection(function(client: Client) {
+		server.onConnection(function(socket: WsSocket) {
 			if (maxPlayers > 0 && clients.length >= maxPlayers) {
 				var bytes = Bytes.alloc(1);
 				bytes.set(0, SESSION_ERROR);
-				client.send(bytes, true);
+				if (socket.readyState == 1) {
+					socket.send(bytes.getData(), function(_) socket.close(1008, "Session full"));
+				}
 				return;
 			}
 
+			var id = freeIds.length > 0 ? freeIds.pop() : nextId++;
+			var client = new WebSocketClient(id, socket);
 			clients.push(client);
 			current = client;
 
@@ -394,6 +436,13 @@ class Session {
 
 			client.onClose(function() {
 				Node.console.log("Removing client " + client.id + ".");
+				freeIds.push(client.id);
+				freeIds.sort((a, b) -> b - a);
+				while (freeIds.length > 0 && freeIds[0] == nextId - 1) {
+					nextId--;
+					freeIds.shift();
+				}
+				clientControllers.remove(client.id);
 				clients.remove(client);
 				sendPlayerUpdate();
 				if (onClientDisconnect != null) {
@@ -452,6 +501,9 @@ class Session {
 		isJoinable = true;
 		server.reset();
 		entityTypes = [];
+		clientControllers = [];
+		freeIds = [];
+		nextId = 0;
 		#else
 		Scheduler.removeTimeTask(updateTaskId);
 		Scheduler.removeTimeTask(pingTaskId);
@@ -474,8 +526,8 @@ class Session {
 		#else
 		for (controller in controllers) {
 			if (controller._inputBufferIndex > 0) {
-				var bytes = haxe.io.Bytes.alloc(22 + controller._inputBufferIndex);
-				bytes.set(0, kha.netsync.Session.CONTROLLER_UPDATES);
+				var bytes = Bytes.alloc(22 + controller._inputBufferIndex);
+				bytes.set(0, CONTROLLER_UPDATES);
 				bytes.setInt32(1, controller._id());
 				bytes.setDouble(5, Scheduler.time());
 				bytes.setInt32(13, System.windowWidth(0));
