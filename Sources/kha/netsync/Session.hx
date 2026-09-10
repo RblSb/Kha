@@ -291,9 +291,7 @@ class Session {
 		refusedCallback = refuseCallback;
 		resetCallback = resCallback;
 		#if sys_server
-		#if direct_connection
 		trace("Starting server at " + port + ".");
-		#end
 		server = new Server(port);
 		startCallback();
 

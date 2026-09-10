@@ -30,15 +30,10 @@ class Server {
 	#if sys_server
 	private var wss: WsServer;
 	private var lastId: Int = -1;
+	#end
 
-	#if !direct_connection
-	private var clients: Map<Int, NodeProcessClient> = new Map();
-	private var connectionCallback: Client->Void;
-	#end
-	#end
 	public function new(port: Int) {
 		#if sys_server
-		#if direct_connection
 		wss = new WsServer({port: port});
 		Node.console.log('[netsync] websocket listening on $port');
 
@@ -47,33 +42,11 @@ class Server {
 		Node.process.on("uncaughtException", function(err) {
 			Node.console.error("[netsync] uncaught: " + err);
 		});
-		#else
-		Node.process.on("message", function(message) {
-			var msg: String = message.message;
-			switch (msg) {
-				case "connect":
-					var id: Int = message.id;
-					var client = new NodeProcessClient(id);
-					clients[id] = client;
-					connectionCallback(client);
-				case "disconnect":
-					var id: Int = message.id;
-					var client = clients[id];
-					client._close();
-					clients.remove(id);
-				case "message":
-					var id: Int = message.id;
-					var client = clients[id];
-					client._message(message.data);
-			}
-		});
-		#end
 		#end
 	}
 
 	public function onConnection(connection: Client->Void): Void {
 		#if sys_server
-		#if direct_connection
 		wss.on("connection", function(socket: WsSocket) {
 			socket.on("error", function(err) {
 				Node.console.error("[netsync] socket error: " + err);
@@ -81,9 +54,6 @@ class Server {
 			++lastId;
 			connection(new WebSocketClient(lastId, socket));
 		});
-		#else
-		connectionCallback = connection;
-		#end
 		#end
 	}
 
