@@ -1,6 +1,7 @@
 package kha.netsync;
 
 import haxe.io.Bytes;
+import kha.Scheduler;
 
 @:headerCode("
 #include <kinc/network/socket.h>
@@ -13,6 +14,8 @@ class Network {
 	var buffer: Bytes;
 	var tempBuffer: Bytes;
 	var listener: Bytes->Void;
+	var updateTaskId: Int;
+	var open = false;
 
 	public function new(url: String, port: Int, errorCallback: Void->Void, closeCallback: Void->Void) {
 		this.url = url;
@@ -21,7 +24,7 @@ class Network {
 		buffer = Bytes.alloc(256); // TODO: Size
 		tempBuffer = Bytes.alloc(256); // TODO: Size
 		init(url, port);
-		kha.Scheduler.addFrameTask(update, 0);
+		updateTaskId = Scheduler.addFrameTask(update, 0);
 	}
 
 	@:functionCode("
@@ -31,7 +34,11 @@ class Network {
 		kinc_socket_set(&socket, \"127.0.0.1\", port, KINC_SOCKET_FAMILY_IP4, KINC_SOCKET_PROTOCOL_UDP);
 		kinc_socket_open(&socket, &options);
 	")
+	function initSocket(port: Int): Void {}
+
 	public function init(url: String, port: Int) {
+		initSocket(port);
+		open = true;
 		send(Bytes.ofString("JOIN"), true); // TODO: Discuss, dependency with Server.hx
 	}
 
@@ -39,13 +46,37 @@ class Network {
 		// TODO: mandatory
 		kinc_socket_send_url(&socket, url, port, (const unsigned char*)bytes->b->getBase(), bytes->length);
 	")
-	public function send(bytes: Bytes, mandatory: Bool): Void {}
+	function sendSocket(bytes: Bytes): Void {}
+
+	public function send(bytes: Bytes, mandatory: Bool): Void {
+		if (open) {
+			sendSocket(bytes);
+		}
+	}
 
 	public function listen(listener: Bytes->Void): Void {
 		this.listener = listener;
 	}
 
+	@:functionCode("
+		kinc_socket_destroy(&socket);
+	")
+	function destroySocket(): Void {}
+
+	public function close(): Void {
+		if (!open) {
+			return;
+		}
+		open = false;
+		Scheduler.removeFrameTask(updateTaskId);
+		destroySocket();
+		listener = null;
+	}
+
 	function update() {
+		if (!open) {
+			return;
+		}
 		var received = getBytesFromSocket(tempBuffer);
 		buffer.blit(bufferPos, tempBuffer, 0, received);
 		bufferPos += received;
