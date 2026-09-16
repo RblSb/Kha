@@ -8,4 +8,6 @@ class Network {
 	public function send(bytes: Bytes, mandatory: Bool): Void {}
 
 	public function listen(listener: Bytes->Void): Void {}
+
+	public function close(): Void {}
 }
